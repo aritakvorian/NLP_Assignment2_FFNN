@@ -6,6 +6,7 @@ from torch import optim
 import numpy as np
 import random
 from sentiment_data import *
+import nltk
 
 
 class SentimentClassifier(object):
@@ -57,7 +58,7 @@ class DeepAveragingNetwork(nn.Module):
         """
         super(DeepAveragingNetwork, self).__init__()
 
-        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.embedding.weight.data.copy_(torch.from_numpy(word_embeddings))
 
         self.fc = nn.Linear(embedding_dim, hidden_dim)
@@ -71,6 +72,8 @@ class DeepAveragingNetwork(nn.Module):
         :param word_indices: A tensor containing the word indices for a sentence.
         :return: Log-probabilities over the classes (positive, negative).
         """
+
+        batch_size, sequence_length = word_indices.size()
 
         embeddings = self.embedding(word_indices)
 
@@ -121,6 +124,78 @@ class NeuralSentimentClassifier(SentimentClassifier):
         return predicted_class
 
 
+def prepare_batches(sentences, word_indexer, correction_cache):
+    max_length = max(len(sentence.words) for sentence in sentences)
+    word_indices_list = []
+    labels = []
+
+    for sentence in sentences:
+        word_indices = [word_indexer.index_of(word) for word in sentence.words]
+        unk_index = word_indexer.index_of("UNK")
+        word_indices = [index if index != -1 else unk_index for index in word_indices]
+        # Pad sequences
+        word_indices += [0] * (max_length - len(word_indices))
+        word_indices_list.append(word_indices)
+        labels.append(sentence.label)
+    return torch.tensor(word_indices_list, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+
+    # for sentence in sentences:
+    #
+    #     word_indices = []
+    #
+    #     for word in sentence.words:
+    #         word_index = word_indexer.index_of(word)
+    #
+    #         if word_index == -1:
+    #             new_word = spelling_correction(word, word_indexer, correction_cache)
+    #             word_index = word_indexer.index_of(new_word)
+    #
+    #         if word_index == -1:
+    #             word_index = word_indexer.index_of("UNK")
+    #
+    #         word_indices.append(word_index)
+    #
+    #     word_indices += [0] * (max_length - len(word_indices))
+    #     word_indices_list.append(word_indices)
+    #     labels.append(sentence.label)
+    #
+    # return torch.tensor(word_indices_list, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+
+
+def generate_batches(sentences, batch_size):
+    batches = []
+    for i in range(0, len(sentences), batch_size):
+        batch = []
+        for j in range(i, min(i + batch_size, len(sentences))):
+            batch.append(sentences[j])
+        batches.append(batch)
+    return batches
+
+
+# def spelling_correction(word, word_indexer, correction_cache):
+#
+#     if word in correction_cache:
+#         return correction_cache[word]
+#
+#     max_edit_distance = 2
+#
+#     min_distance = 999999999
+#     adjusted_word = word
+#
+#     for word_in_index in word_indexer.objs_to_ints:
+#         distance = nltk.edit_distance(word, word_in_index)
+#         if distance < min_distance and distance <= max_edit_distance:
+#             min_distance = distance
+#             adjusted_word = word_in_index
+#
+#     if min_distance <= max_edit_distance:
+#         correction_cache[word] = adjusted_word
+#     else:
+#         correction_cache[word] = word
+#
+#     return correction_cache[word]
+
+
 def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_exs: List[SentimentExample],
                                  word_embeddings: WordEmbeddings, train_model_for_typo_setting: bool) -> NeuralSentimentClassifier:
     """
@@ -143,6 +218,7 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
     embedding_dim = word_embeddings.get_embedding_length()  # Embedding dimension
     hidden_dim = 24  # Hidden layer size
     output_dim = 2  # Two output classes: positive (1) and negative (0)
+    batch_size = args.batch_size
 
     # Initialize the neural network
     dan_model = DeepAveragingNetwork(vocab_size, embedding_dim, hidden_dim, output_dim,
@@ -154,32 +230,26 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
     # Optimizer: Adam optimizer
     optimizer = optim.Adam(dan_model.parameters(), lr=args.lr)
 
+    correction_cache = {}
+
     # Training loop
-    num_epochs = 10
+    num_epochs = 13
     for epoch in range(num_epochs):
         dan_model.train()  # Set model to training mode
 
         total_loss = 0
-        for example in train_exs:
-            # Convert words to indices
-            word_indices = [word_embeddings.word_indexer.index_of(word) for word in example.words]
 
-            unk_index = word_embeddings.word_indexer.index_of("UNK")
-            word_indices = [index if index != -1 else unk_index for index in word_indices]
-
-            word_indices_tensor = torch.tensor([word_indices], dtype=torch.long)
-
-            # Target label as tensor
-            target_label = torch.tensor([example.label], dtype=torch.long)
+        for batch in generate_batches(train_exs, batch_size):
+            batch_data, batch_labels = prepare_batches(batch, word_embeddings.word_indexer, correction_cache)
 
             # Zero gradients
             optimizer.zero_grad()
 
             # Forward pass: Compute log-probabilities
-            log_probs = dan_model(word_indices_tensor)
+            log_probs = dan_model(batch_data)
 
             # Compute loss
-            loss = criterion(log_probs, target_label)
+            loss = criterion(log_probs, batch_labels)
 
             # Backpropagate the loss
             loss.backward()
@@ -190,6 +260,37 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
             total_loss += loss.item()
 
         print(f'Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(train_exs)}')
+
+        # for example in train_exs:
+        #     # Convert words to indices
+        #     word_indices = [word_embeddings.word_indexer.index_of(word) for word in example.words]
+        #
+        #     unk_index = word_embeddings.word_indexer.index_of("UNK")
+        #     word_indices = [index if index != -1 else unk_index for index in word_indices]
+        #
+        #     word_indices_tensor = torch.tensor([word_indices], dtype=torch.long)
+        #
+        #     # Target label as tensor
+        #     target_label = torch.tensor([example.label], dtype=torch.long)
+        #
+        #     # Zero gradients
+        #     optimizer.zero_grad()
+        #
+        #     # Forward pass: Compute log-probabilities
+        #     log_probs = dan_model(word_indices_tensor)
+        #
+        #     # Compute loss
+        #     loss = criterion(log_probs, target_label)
+        #
+        #     # Backpropagate the loss
+        #     loss.backward()
+        #
+        #     # Update model parameters
+        #     optimizer.step()
+        #
+        #     total_loss += loss.item()
+        #
+        # print(f'Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(train_exs)}')
 
     # After training, return the trained NeuralSentimentClassifier
     return NeuralSentimentClassifier(dan_model, word_embeddings)
