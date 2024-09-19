@@ -171,9 +171,10 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
 
     vocab_size = len(word_embeddings.word_indexer)
     embedding_dim = word_embeddings.get_embedding_length()
-    hidden_dim = 24
+    hidden_dim = 36
     output_dim = 2
-    batch_size = args.batch_size
+    #batch_size = args.batch_size
+    batch_size = 3
 
     #modify_embeddings_with_prefixes(word_embeddings, prefix_length=3)
 
