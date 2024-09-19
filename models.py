@@ -49,13 +49,7 @@ class TrivialSentimentClassifier(SentimentClassifier):
 class DeepAveragingNetwork(nn.Module):
     def __init__(self, vocab_size: int, embedding_dim: int, hidden_dim: int, output_dim: int,
                  word_embeddings: torch.Tensor):
-        """
-        :param vocab_size: The size of the vocabulary (number of unique tokens).
-        :param embedding_dim: The dimensionality of the word embeddings.
-        :param hidden_dim: The number of hidden units in the fully connected layer.
-        :param output_dim: The number of output classes (in this case, 2 for binary sentiment classification).
-        :param word_embeddings: Pre-trained word embeddings to initialize the nn.Embedding layer.
-        """
+
         super(DeepAveragingNetwork, self).__init__()
 
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
@@ -68,10 +62,6 @@ class DeepAveragingNetwork(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, word_indices: torch.Tensor) -> torch.Tensor:
-        """
-        :param word_indices: A tensor containing the word indices for a sentence.
-        :return: Log-probabilities over the classes (positive, negative).
-        """
 
         batch_size, sequence_length = word_indices.size()
 
@@ -93,23 +83,13 @@ class NeuralSentimentClassifier(SentimentClassifier):
     but may make things faster!)
     """
     def __init__(self, model, word_embeddings):
-        """
-        :param model: The trained neural network (DAN) instance.
-        :param word_embeddings: Word embeddings used for mapping words to vectors.
-        :param vocab: Vocabulary object to convert words into indices.
-        """
+
         self.model = model
         self.word_embeddings = word_embeddings
         self.word_indexer = word_embeddings.word_indexer
         self.embedding_length = word_embeddings.get_embedding_length()
 
     def predict(self, ex_words: List[str], has_typos: bool) -> int:
-        """
-        Predict the sentiment label for a given list of words.
-        :param ex_words: A list of words representing a sentence.
-        :param has_typos: A flag indicating whether we're evaluating on typo data (currently unused).
-        :return: 0 (negative) or 1 (positive).
-        """
 
         word_indices = [self.word_indexer.index_of(word) for word in ex_words]
         unk_index = self.word_indexer.index_of("UNK")
@@ -124,42 +104,26 @@ class NeuralSentimentClassifier(SentimentClassifier):
         return predicted_class
 
 
-def prepare_batches(sentences, word_indexer, correction_cache):
+def prepare_batches(sentences, word_indexer, prefix_length):
     max_length = max(len(sentence.words) for sentence in sentences)
     word_indices_list = []
     labels = []
 
     for sentence in sentences:
-        word_indices = [word_indexer.index_of(word) for word in sentence.words]
-        unk_index = word_indexer.index_of("UNK")
-        word_indices = [index if index != -1 else unk_index for index in word_indices]
-        # Pad sequences
+        word_indices = []
+        for word in sentence.words:
+
+            #truncated_word = word[:prefix_length]
+            truncated_word = word
+            index = word_indexer.index_of(truncated_word)
+            if index == -1:
+                index = word_indexer.index_of("UNK")
+            word_indices.append(index)
+
         word_indices += [0] * (max_length - len(word_indices))
         word_indices_list.append(word_indices)
         labels.append(sentence.label)
     return torch.tensor(word_indices_list, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
-
-    # for sentence in sentences:
-    #
-    #     word_indices = []
-    #
-    #     for word in sentence.words:
-    #         word_index = word_indexer.index_of(word)
-    #
-    #         if word_index == -1:
-    #             new_word = spelling_correction(word, word_indexer, correction_cache)
-    #             word_index = word_indexer.index_of(new_word)
-    #
-    #         if word_index == -1:
-    #             word_index = word_indexer.index_of("UNK")
-    #
-    #         word_indices.append(word_index)
-    #
-    #     word_indices += [0] * (max_length - len(word_indices))
-    #     word_indices_list.append(word_indices)
-    #     labels.append(sentence.label)
-    #
-    # return torch.tensor(word_indices_list, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
 
 
 def generate_batches(sentences, batch_size):
@@ -172,126 +136,75 @@ def generate_batches(sentences, batch_size):
     return batches
 
 
-# def spelling_correction(word, word_indexer, correction_cache):
-#
-#     if word in correction_cache:
-#         return correction_cache[word]
-#
-#     max_edit_distance = 2
-#
-#     min_distance = 999999999
-#     adjusted_word = word
-#
-#     for word_in_index in word_indexer.objs_to_ints:
-#         distance = nltk.edit_distance(word, word_in_index)
-#         if distance < min_distance and distance <= max_edit_distance:
-#             min_distance = distance
-#             adjusted_word = word_in_index
-#
-#     if min_distance <= max_edit_distance:
-#         correction_cache[word] = adjusted_word
-#     else:
-#         correction_cache[word] = word
-#
-#     return correction_cache[word]
+def modify_embeddings_with_prefixes(word_embeddings, prefix_length=3):
+    word_indexer = word_embeddings.word_indexer
+    vectors = word_embeddings.vectors
+    prefix_indexer = {}
+
+    for word in word_indexer.objs_to_ints:
+
+        index = word_indexer.index_of(word)
+
+        if len(word) > prefix_length:
+            prefix = word[:prefix_length]
+            if prefix not in prefix_indexer:
+                prefix_indexer[prefix] = []
+            prefix_indexer[prefix].append(index)
+
+    updated_vectors = np.copy(vectors)
+    for prefix, indices in prefix_indexer.items():
+        if len(indices) > 1:
+
+            prefix_embedding = np.mean([vectors[i] for i in indices], axis=0)
+            for j in indices:
+                updated_vectors[j] = prefix_embedding
+
+    word_embeddings.vectors = updated_vectors
 
 
 def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_exs: List[SentimentExample],
                                  word_embeddings: WordEmbeddings, train_model_for_typo_setting: bool) -> NeuralSentimentClassifier:
-    """
-    :param args: Command-line args so you can access them here
-    :param train_exs: training examples
-    :param dev_exs: development set, in case you wish to evaluate your model during training
-    :param word_embeddings: set of loaded word embeddings
-    :param train_model_for_typo_setting: True if we should train the model for the typo setting, False otherwise
-    :return: A trained NeuralSentimentClassifier model. Note: you can create an additional subclass of SentimentClassifier
-    and return an instance of that for the typo setting if you want; you're allowed to return two different model types
-    for the two settings.
-    """
-    # Set random seed for reproducibility
+
     torch.manual_seed(42)
     random.seed(42)
     np.random.seed(42)
 
-    # Define the network parameters
     vocab_size = len(word_embeddings.word_indexer)
-    embedding_dim = word_embeddings.get_embedding_length()  # Embedding dimension
-    hidden_dim = 24  # Hidden layer size
-    output_dim = 2  # Two output classes: positive (1) and negative (0)
+    embedding_dim = word_embeddings.get_embedding_length()
+    hidden_dim = 24
+    output_dim = 2
     batch_size = args.batch_size
 
-    # Initialize the neural network
+    #modify_embeddings_with_prefixes(word_embeddings, prefix_length=3)
+
     dan_model = DeepAveragingNetwork(vocab_size, embedding_dim, hidden_dim, output_dim,
                                      word_embeddings.vectors)
 
-    # Loss function: Negative Log-Likelihood Loss since we use LogSoftmax in the model
     criterion = nn.NLLLoss()
-
-    # Optimizer: Adam optimizer
     optimizer = optim.Adam(dan_model.parameters(), lr=args.lr)
 
     correction_cache = {}
 
-    # Training loop
     num_epochs = 13
     for epoch in range(num_epochs):
-        dan_model.train()  # Set model to training mode
+        dan_model.train()
 
         total_loss = 0
 
         for batch in generate_batches(train_exs, batch_size):
-            batch_data, batch_labels = prepare_batches(batch, word_embeddings.word_indexer, correction_cache)
+            batch_data, batch_labels = prepare_batches(batch, word_embeddings.word_indexer, prefix_length=3)
 
-            # Zero gradients
             optimizer.zero_grad()
 
-            # Forward pass: Compute log-probabilities
             log_probs = dan_model(batch_data)
-
-            # Compute loss
             loss = criterion(log_probs, batch_labels)
-
-            # Backpropagate the loss
             loss.backward()
 
-            # Update model parameters
             optimizer.step()
 
             total_loss += loss.item()
 
-        print(f'Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(train_exs)}')
+        print(f'Epoch {epoch + 1}/{num_epochs} | Loss: {total_loss / len(train_exs)}')
 
-        # for example in train_exs:
-        #     # Convert words to indices
-        #     word_indices = [word_embeddings.word_indexer.index_of(word) for word in example.words]
-        #
-        #     unk_index = word_embeddings.word_indexer.index_of("UNK")
-        #     word_indices = [index if index != -1 else unk_index for index in word_indices]
-        #
-        #     word_indices_tensor = torch.tensor([word_indices], dtype=torch.long)
-        #
-        #     # Target label as tensor
-        #     target_label = torch.tensor([example.label], dtype=torch.long)
-        #
-        #     # Zero gradients
-        #     optimizer.zero_grad()
-        #
-        #     # Forward pass: Compute log-probabilities
-        #     log_probs = dan_model(word_indices_tensor)
-        #
-        #     # Compute loss
-        #     loss = criterion(log_probs, target_label)
-        #
-        #     # Backpropagate the loss
-        #     loss.backward()
-        #
-        #     # Update model parameters
-        #     optimizer.step()
-        #
-        #     total_loss += loss.item()
-        #
-        # print(f'Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(train_exs)}')
-
-    # After training, return the trained NeuralSentimentClassifier
     return NeuralSentimentClassifier(dan_model, word_embeddings)
 
