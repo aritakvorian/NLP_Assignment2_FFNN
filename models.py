@@ -173,8 +173,8 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
     embedding_dim = word_embeddings.get_embedding_length()
     hidden_dim = 36
     output_dim = 2
-    #batch_size = args.batch_size
-    batch_size = 3
+    batch_size = args.batch_size
+    batch_size = 8
 
     #modify_embeddings_with_prefixes(word_embeddings, prefix_length=3)
 
@@ -186,8 +186,11 @@ def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_ex
 
     correction_cache = {}
 
-    num_epochs = 13
+    num_epochs = 10
     for epoch in range(num_epochs):
+
+        random.shuffle(train_exs)
+
         dan_model.train()
 
         total_loss = 0
